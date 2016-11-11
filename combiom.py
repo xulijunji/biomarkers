@@ -10,68 +10,51 @@ import string as st
 import numexpr as ne
 
 
-class Combiom:
-    """Combiom class"""
+def init_iterators(parameters):
 
-    def __init__(self, pars, obs, vols = None):
+    iterators = {
+            'a': list(range(parameters)),
+            '1/a': list(range(parameters)),
+            'a/b': list(it.permutations(range(parameters), 2)),
+            'a/b/c': list(iter((x, y, z) for x, y, z in it.permutations(range(parameters), 3) if z > y)),
+            'a*b/c': list(it.combinations(range(parameters), 3)),
+            'a*b/c/d': list(iter((a, b, c, d) for a, b, c, d in it.permutations(range(parameters), 4) if b > a and d > c))
+    }
+    return iterators
+        
+    
+def search(marker_names, marker_data, target_num, target_data, target_names, iterators, iterator_type='all'):
 
-        if not all(isinstance(a, (float, int)) 
-                   for a in [pars, obs, vols]):
-            raise ValueError('Please define class arguments: they must be integers and coinсide with data shape')
+    results, temp = [], []
+    queue = iterators.keys() if iterator_type == 'all' else iterator_type
+        
+    Pool = mp.Pool(mp.cpu_count())
 
-        self.parameters = int(pars)
-        self.observations = int(obs)
-        self.volunteers = int(vols)
+    for it in queue:
 
-        self.iterators = {
-            'a': range(self.parameters),
-            '1/a': range(self.parameters),
-            'a/b': it.permutations(range(self.parameters), 2),
-            'a/b/c': iter((x, y, z) for x, y, z in it.permutations(range(self.parameters), 3) if z > y),
-            'a*b/c': it.combinations(range(self.parameters), 3),
-            'a*b/c/d': iter((a, b, c, d) for a, b, c, d in it.permutations(range(self.parameters), 4) if b > a and d > c)
-        }
+        r = Pool.apply_async(__iterate_combinations, args=(marker_names, marker_data,
+                                                           target_num, target_data, target_names,
+                                                           iterators, it))
+        temp.append(r)
 
+    for r in temp:
+        results.append(r.get())
 
-    def load_target_data(self, target_names, target_data):
-        '''def load_target_data(self, target_names, target_data)'''
+    Pool.close()
+    Pool.join()
 
-        self.target_names = target_names
-        self.target_data = target_data
-        self.target_num = len(target_names)
-
-
-    def load_marker_data(self, marker_names, marker_data):
-        '''def load_marker_data(self, marker_names, marker_data):'''
-
-        self.marker_names = marker_names
-        self.marker_data = marker_data
-
-
-    def search(self, it_type='all'):
-
-        results = []
-        queue = self.iterators.keys() if it_type == 'all' else it_type
-
-        for i in queue:
-
-            r = self.__iterate_combinations(i)
-            results.append(r)
-
-        print('Search was successfully finished')
-        return results
+    print('Search was successfully finished')
+    return results
 
 
-    def to_dataframe(self, data):
-        '''Data must be output of .search() method'''
-
-        dfl = []
+def to_dataframe(data):
+        '''Data returned by .search() method'''
 
         # Importing results and adding to a list
-        for i in data:
-            dfl.append(pd.DataFrame(i, columns=['Biomarker', 'Target marker',
-                                                'M1', 'M2', 'M3', 'M4',
-                                                'TS', 'R', 'KR', 'MID', 'TID', 'Type']))
+        cols = ['Biomarker', 'Target marker',
+                'M1', 'M2', 'M3', 'M4',
+                'TS', 'R', 'KR', 'MID', 'TID', 'Type']
+        dfl = [pd.DataFrame(i, columns=cols) for i in data]
 
         df = pd.concat(dfl)
         df = df.rename(columns={'TS': 'Theil-Sen Score', 'R': 'Ridge Score', 'KR': 'Kernel Ridge Score',
@@ -80,14 +63,7 @@ class Combiom:
         return df
 
 
-    def __iterate_combinations(self, iterator_type):
-
-        p_num = self.parameters
-        p_names = self.marker_names
-        p_data = self.marker_data
-        t_num = self.target_num
-        t_names = self.target_names
-        t_data = self.target_data
+def __iterate_combinations(marker_names, marker_data, target_num, target_data, target_names, iterators, iterator_type):
 
         output = {'Biomarker': [], 'Target marker': [],
                   'M1': [], 'M2': [], 'M3': [], 'M4': [],
@@ -95,37 +71,39 @@ class Combiom:
                   'MID': [], 'TID': [], 'Type': []}
 
         print('Search:', iterator_type, 'started')
-
-        for a, t in it.product(self.iterators[iterator_type], range(t_num)):
+        
+        for a, t in it.product(iterators[iterator_type], range(target_num)):
 
             list_ids = np.array([a]).ravel()
             list_ops = list(re.sub(r"\w", "", iterator_type))
 
             # Naming a combinatorial marker
-            marker_name = self.__name(iterator_type, list_ids)
+            marker_name = __name(marker_names, iterator_type, list_ids)
 
             # Naming simple markers and padding list with np.nan to make it 4-element
-            simple_markers_names = np.pad(self.marker_names[[list_ids]].astype('object'),
+            simple_markers_names = np.pad(marker_names[[list_ids]].astype('object'),
                                           (0, 4-len(list_ids)), mode='constant', constant_values=(0, np.nan))
-
+            
             # Calculating marker
-            marker_value = self.__calc_marker(iterator_type, list_ids)
+            marker_values = __calc_marker(marker_data, iterator_type, list_ids)
 
             # Preprocessing data: transforming NaN values into neighbours-mean
             # and normalizing data
-            marker_value = self.__transform_nan(marker_value)
-            marker_value_norm = self.__normalize(marker_value)
+            if np.isnan(marker_values).any():
+                marker_values = __transform_nan(marker_values)
+            marker_values_norm = __normalize(marker_values)
+            marker_values_norm = marker_values_norm.reshape(-1, 1)
 
             # Marker IDs joining into a string
             mid = ', '.join(map(str, list_ids))
 
             # Naming a target
-            target_name = t_names[t]
-            target_data = np.copy(t_data[t].reshape(-1, 1))
+            target_name = target_names[t]
+            target_values = target_data[t].reshape(-1, 1)
             tid = str(t)
 
             # Regression
-            ts_score, ridge_score, kr_score = self.__regression(marker_value_norm, target_data)
+            ts_score, ridge_score, kr_score = __regression(marker_values_norm, target_values)
 
             # Processing results
             if any(z > 0.8 for z in (np.around(ts_score, 1), np.around(ridge_score, 1), np.around(kr_score, 1))):
@@ -145,40 +123,41 @@ class Combiom:
 
         return output
 
-    def __regression(self, x, y, regressor_return=False):
 
-        # TheilSen Regression
-        ts_y = np.copy(y.ravel())
-        ts = sk_lm.TheilSenRegressor()
-        ts.fit(x, ts_y)
+def __regression(x, y, regressor_return=False):
 
-        # r squared
-        ts_y_pred = ts.predict(x)
-        ts_y_mean = np.mean(ts_y)
-        ts_ssr = np.sum((ts_y_pred - ts_y_mean) ** 2)
-        ts_sst = np.sum((ts_y - ts_y_mean) ** 2)
-        #ts_score = np.absolute(ts.score(index_norm, ts_y))
-        ts_score = ts_ssr / ts_sst
+    # TheilSen Regression
+    ts_y = y.ravel()
+    ts = sk_lm.TheilSenRegressor()
+    ts.fit(x, ts_y)
 
-        # Ridge Regression
-        # Normalizating & reshaping
-        ridge = sk_lm.Ridge(alpha=0.01, normalize=False)
-        ridge.fit(x, y)
-        ridge_score = np.absolute(ridge.score(x, y))
+    # r squared
+    ts_y_pred = ts.predict(x)
+    ts_y_mean = np.mean(ts_y)
+    ts_ssr = np.sum((ts_y_pred - ts_y_mean) ** 2)
+    ts_sst = np.sum((ts_y - ts_y_mean) ** 2)
+    #ts_score = np.absolute(ts.score(index_norm, ts_y))
+    ts_score = ts_ssr / ts_sst
 
-        # Kernel Ridge Regression
-        kernel_ridge = sk_kr.KernelRidge(kernel='rbf', alpha=0.0001)
-        kernel_ridge.fit(x, y)
-        kr_score = np.absolute(kernel_ridge.score(x, y))
+    # Ridge Regression
+    # Normalizating & reshaping
+    ridge = sk_lm.Ridge(alpha=0.01, normalize=False)
+    ridge.fit(x, y)
+    ridge_score = np.absolute(ridge.score(x, y))
 
-        if regressor_return:
-            return (ts, ridge, kernel_ridge)
-        else:
-            return (ts_score, ridge_score, kr_score)
+    # Kernel Ridge Regression
+    kernel_ridge = sk_kr.KernelRidge(kernel='rbf', alpha=0.01)
+    kernel_ridge.fit(x, y)
+    kr_score = np.absolute(kernel_ridge.score(x, y))
+
+    if regressor_return:
+        return (ts, ridge, kernel_ridge)
+    else:
+        return (ts_score, ridge_score, kr_score)
 
 
 
-    def __transform_nan(self, x, strategy='mean'):
+def __transform_nan(x, strategy='mean'):
 
         imp = sk_pr.Imputer(missing_values='NaN', strategy=strategy)
         x = imp.fit_transform(x.reshape(-1, 1))
@@ -186,61 +165,65 @@ class Combiom:
         return x
 
 
-    def __normalize(self, x):
+def __normalize(x, sample=None):
 
-        return sk_pr.normalize(x, axis=0)
-
-
-    def __name(self, marker_type, ids):
-
-        data = {}
-        for l, p in zip(st.ascii_letters[: ids.size], self.marker_names[ids]):
-            data[l] = p
-
-        rep = dict((re.escape(k), v) for k, v in data.items())
-        pattern = re.compile("|".join(rep.keys()))
-        text = pattern.sub(lambda m: rep[re.escape(m.group(0))], marker_type)
-
-        return text
+    if sample is None:
+        sample = x
+    return (x - np.mean(sample)) / np.std(sample)
 
 
-    def __calc_marker(self, marker_type, ids):
+def __name(marker_names, marker_type, ids):
 
-        data = {}
+    data = {}
+    for l, p in zip(st.ascii_letters[: ids.size], marker_names[ids]):
+        data[l] = p
 
-        for l, p in zip(st.ascii_letters[: ids.size], self.marker_data[ids]):
-            data[l] = p
+    rep = dict((re.escape(k), v) for k, v in data.items())
+    pattern = re.compile("|".join(rep.keys()))
+    text = pattern.sub(lambda m: rep[re.escape(m.group(0))], marker_type)
 
-        # Example: a*b/c (type), {a: ..., b: ..., c: ...} (data)
-        marker = ne.evaluate(marker_type, data)
-
-        return marker
+    return text
 
 
-    def retrain(self, marker_names, marker_type, target_name):
+def __calc_marker(marker_data, marker_type, ids):
 
-        marker_ids = []
+    data = {}
 
-        for n in markers_names:
-            marker_ids.append(np.where(self.marker_names == n)[0][0])
+    for l, p in zip(st.ascii_letters[: ids.size], marker_data[ids]):
+        data[l] = p
 
-        target_data = self.target_data[np.where(self.target_names == target_name)[0][0]]
+    # Example: a*b/c (type), {a: ..., b: ..., c: ...} (data)
+    marker = ne.evaluate(marker_type, data)
+        
+    return marker
 
-        d = {}
-        for i, (l, p) in enumerate(zip(st.ascii_letters[: len(marker_ids)], self.marker_data[[marker_ids]])):
-            d[l] = p
 
-        x = ne.evaluate(marker_type, d)
+def predict(marker_values, marker_data, markers_names, marker_names, marker_type, target_data, target_names, target_name):
 
-        # Calculating marker
-        marker_value = self.__calc_marker(marker_type, marker_ids)
+    marker_ids = np.array([np.where(markers_names == n)[0][0] for n in marker_names])
 
-        # Preprocessing data: transforming NaN values into neighbours-mean
-        # and normalizing data 
-        marker_value = self.__transform_nan(marker_value)
-        marker_value_norm = self.__normalize(marker_value)
+    target_values = target_data[np.where(target_names == target_name)[0][0]].reshape(-1, 1)
 
-        # regression
-        ts, ridge, kernel_ridge = self.__regression(index_norm, targetdata, regressor_return=True)
-        return (ts, ridge, kernel_ridge)
+    d = {}
+    for i, (l, p) in enumerate(zip(st.ascii_letters[: len(marker_values)], marker_values)):
+        d[l] = p
+
+    marker_value = ne.evaluate(marker_type, d)
+
+    # Calculating marker
+    marker_train_values = __calc_marker(marker_data, marker_type, marker_ids)
+
+    # Preprocessing data: transforming NaN values into neighbours-mean
+    # and normalizing data 
+    #marker_value = self.__transform_nan(marker_values)
+    marker_value_norm = __normalize(marker_value, marker_train_values)
+    marker_train_values_norm = __normalize(marker_train_values)
+    marker_train_values_norm = marker_train_values_norm.reshape(-1, 1)
+
+    # regression
+    ts, ridge, kernel_ridge = __regression(marker_train_values_norm, target_values, regressor_return=True)
+    return (10**ts.predict(marker_value_norm),
+            10**ridge.predict(marker_value_norm),
+            10**kernel_ridge.predict(marker_value_norm))
+
 
